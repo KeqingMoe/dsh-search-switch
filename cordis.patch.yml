@@ -1,0 +1,6 @@
+# Loader entry for the Host half. The Client module is discovered from the same
+# package through `dsh.client`, so this row exists mostly to put the package in
+# the boot graph; the row id is the handle future overlays use to disable it.
+- insert:
+    - id: search-switch
+      name: dsh-search-switch

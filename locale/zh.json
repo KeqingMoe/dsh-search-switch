@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "搜索提供方切换",
+    "description": "在设置 > 通用中新增一行，用来切换 web_search 背后的提供方，包括 Codex 搜索。"
+  }
+}

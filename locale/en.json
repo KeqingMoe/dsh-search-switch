@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Search Provider Switch",
+    "description": "Adds a Settings > General row that chooses the provider behind web_search, including the Codex search provider."
+  }
+}

@@ -1,0 +1,104 @@
+# dsh-search-switch
+
+给 DeepSeek Harness 的 **设置 → 通用** 加一行「网页搜索提供方」，在 `web_search` 真正注册着的后端之间切换。
+
+列表不是写死的：每次打开都向 Host 现取 `ctx.web` 里已注册的 provider，所以装了 [dsh-codex](https://github.com/Yan-Zero/dsh-codex) 就有 `openai-codex`，装了别的 provider 插件也会自动出现，卸载了就消失。
+
+选择写进当前 profile 的 patch，**下一次搜索立即生效**，不用重启。
+
+## 为什么需要它
+
+内置的「插件 → 内置插件配置 → 网页搜索」页只认识两个 DeepSeek id，`openai-codex` 不在里面；在那页一切换，Codex 搜索就会被覆盖回 `deepseek-official`。这个插件把当前注册表整个列出来，并且不碰密钥、接口地址等其他设置。
+
+## 安装
+
+```sh
+dsh plugin --profile <profile> add dsh-search-switch
+```
+
+或者界面里：**设置 → 插件 → 添加**，填包名 `dsh-search-switch`。装好后打开 **设置 → 通用**，在「外观」「快捷键」附近就能看到这一行。
+
+本地开发时可以直接装目录：
+
+```sh
+dsh plugin --profile <profile> add /path/to/dsh-search-switch
+```
+
+## 它怎么工作
+
+Host 半侧注册两条同源路由（`src/index.ts`）：
+
+| 路由                                     | 作用                                                                                   |
+| ---------------------------------------- | -------------------------------------------------------------------------------------- |
+| `GET /plugins/dsh-search-switch/state`   | 已注册 provider（含各自的 `available()`）+ 当前选择 + `DSH_WEB_SEARCH_PROVIDER` 回退值 |
+| `POST /plugins/dsh-search-switch/select` | 校验 id 确实在注册表里，然后落盘                                                       |
+
+`select` 的落盘路径：`ctx.settings.update('web', { searchProvider: id })` → 写 profile 的 `cordis.patch.yml` → Loader 判定「只有 volatile 变了」→ 原地提交运行中的引用。所以不需要重启，也不会重挂载。
+
+没有 settings 服务的部署（自己拼的组合）退化为**只对当前进程生效**：直接往 `ctx.web.config.searchProvider` 这个 volatile 引用里写，界面会明说这一点。
+
+### 界面
+
+这一行用的是宿主自己的控件：`@deepseek-ai/dsh-client-ui-primitives` 的 `Menu` 加 `IconChevronDownOutlineRegular`。它在 Web 壳的冻结模块表里是基线模块，浏览器端直接 `require` 就能拿到，所以触发器几何、浮层配色、弹出定位、键盘导航、点外部/失焦关闭，全都和「插话发送」这类下拉一致，不是照着描的。
+
+代价：这是平台接口而不是公开的插件契约，跨 DSH 版本可能改。`devDependencies` 钉了构建时的版本，`pnpm run typecheck` 对着它检查；升级 dsh 后重跑一次构建即可发现不兼容。
+
+### 关于私有面
+
+`@deepseek-ai/dsh-web` 的 `WebRuntime` 没有公开枚举、也没有当前选择的读取口：`config`、`searchProviders` 和 `searchProviderEnv` 都是 TypeScript `private`，声明文件里刻意不出现。这个插件必须看到注册表，于是通过 `src/index.ts` 里的 `WebRuntimeInternals` 读它们：
+
+- `searchProviders` — 注册表（`Map`）
+- `config.searchProvider` — 当前配置值（volatile 引用，公开的 `Volatile<T>` 只有 `get()`）
+- `searchProviderEnv` — 启动时捕获的 `DSH_WEB_SEARCH_PROVIDER`（`process.env` 现在读会与运行时不一致，所以读实例字段）
+
+读取全部带形状校验：哪天这些字段改名或被藏起来，路由返回 `web-unavailable`，设置页显示错误，而不是整页崩掉或列出空表。
+
+## API
+
+脚本也能用同一条链路：
+
+```sh
+# 看注册表
+curl -b cookies.txt http://127.0.0.1:3080/plugins/dsh-search-switch/state
+
+# 切换
+curl -b cookies.txt -X POST -H 'content-type: application/json' \
+  -d '{"searchProvider":"openai-codex"}' \
+  http://127.0.0.1:3080/plugins/dsh-search-switch/select
+```
+
+未注册的 id 返回 `409 {"ok":false,"error":{"code":"unknown-provider",…}}`，且不写任何东西。
+
+## 开发
+
+```sh
+pnpm install
+pnpm run typecheck   # tsc（Host）+ tsc（Client，react-jsx）
+pnpm run build       # typecheck + clean + tsdown
+pnpm test            # build + 14 个用例
+pnpm lint            # biome check（格式 + lint，只读）
+pnpm lint:fix        # biome check --write（提交前跑这个）
+pnpm fmt             # biome format --write（只格式化）
+```
+
+产物 `lib/index.js`（ESM，Host）和 `lib/client.js`（CJS 闭包工厂，浏览器），`lib/` 不进 git。客户端产物的 banner/intro/footer 是 Harness 模块加载器的约定，和 `packages/client/tsdown.client.ts` 一致，不要改。
+
+测试分两半，都跑构建产物：
+
+- `test/host.test.mjs` — 用假 ctx 跑 `apply`，直接调两条路由的 handler：枚举、特性开关、两种落盘路径（settings / volatile 写入）、未知 id、坏 body、seam 变更后的降级。
+- `test/client.test.mjs` — 用假 `window.__ModuleLoader__` 执行 `lib/client.js`、物化 factory，再用 `react-dom/server` 渲染这一行：注册契约、正常/不可用/未注册/env 回退/内存模式/读取失败。
+
+## 发布
+
+```sh
+npm publish
+```
+
+`files` 只带 `lib`、patch、locale、图标、README、LICENSE；`prepublishOnly` 会先跑构建。
+
+## 已知限制
+
+- 依赖上面那三个私有字段；已做形状校验，但上游若改语义（例如把选择挪进别的对象）需要跟着改。
+- 路由和 Harness 自己的设置页受同一道认证保护（`/plugins/*` 先过 Web 认证）；它不额外做 CSRF 校验，因为认证 cookie 是 `SameSite=Strict`，且写入口径与设置页完全一致。
+- 只切换 **search** provider；`fetchProvider` 没做界面（seam 里两者独立，Codex 搜索也不需要改抓取）。
+- 控件依赖 `@deepseek-ai/dsh-client-ui-primitives` 这个平台模块的 `Menu` API；DSH 大版本升级后若该 API 变动，需要跟着改 `src/client/menu.tsx`（构建会先失败，不会静默）。
